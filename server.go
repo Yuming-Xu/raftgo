@@ -67,7 +67,7 @@ func (s *server)TransMsg(ctx context.Context, msgSend *pb.MessageSend)(*pb.Messa
 				msgRet.Success = 0
 			} else {
 				if s.votedFor == 0 || s.votedFor == msgSend.NodeId{
-					if s.isUpToDate(msgSend.logTerm,msgSend.LogIndex){
+					if s.isUpToDate(msgSend.LogTerm,msgSend.LogIndex){
 						s.votedFor = msgSend.NodeId
 						msgRet.Success = 1
 					}else{
@@ -76,12 +76,6 @@ func (s *server)TransMsg(ctx context.Context, msgSend *pb.MessageSend)(*pb.Messa
 				}else {
 					msgRet.Success = 0
 				}
-			}
-		case 2:
-			if msgSend.Term < s.currentTerm {
-				msgRet.Success = 0
-			}else{
-				s.leaderId = msgSend.NodeId
 			}
 		default://heartbeat or appendEntry RPC
 
@@ -92,7 +86,7 @@ func (s *server)TransMsg(ctx context.Context, msgSend *pb.MessageSend)(*pb.Messa
 				s.leaderId = msgSend.NodeId
 				if s.simple_raftlog_length < msgSend.LogIndex {//didn't exist a Entry in the previous one
 					msgRet.Success = 0
-				}else if s.simple_raftlog_length >= msgSend.LogIndex && msgSend.logTerm != s.simple_raftlog_Term[msgSend.LogIndex]{
+				}else if s.simple_raftlog_length >= msgSend.LogIndex && msgSend.LogTerm != s.simple_raftlog_Term[msgSend.LogIndex]{
 					//there is a conflict,delete all entries in Index and after it
 					//logLock.Lock()
 					s.simple_raftlog_length = msgSend.LogIndex - 1
@@ -107,7 +101,9 @@ func (s *server)TransMsg(ctx context.Context, msgSend *pb.MessageSend)(*pb.Messa
 						s.simple_raftlog_length = msgSend.LogIndex+1
 						//logLock.Unlock()
 					}
-					s.AddEntry(msgSend.Entry.key,msgSend.Entry.Value,msgSend.Entry.Term)
+					if msgSend.Type != 2{
+						s.AddEntry(msgSend.Entry.key,msgSend.Entry.Value,msgSend.Entry.Term)
+					}
 				}
 				if msgSend.CommitIndex > s.CommitIndex{
 				//serverLock.Lock()
@@ -128,6 +124,57 @@ func (s *server)AddEntry(key,Value string,Term uint64){
 	s.simple_raftlog_key = key
 	//logLock.Unlock()
 }
+func (s *server)ProduceEntry(index uint64)pb.Entry{
+	var entry pb.Entry
+	entry.Type = 0//todo: produce configtype
+	entry.Term = s.simple_raftlog_Term[index]
+	entry.Index = index
+	entry.key = s.simple_raftlog_key[index]
+	entry.value = s.simple_raftlog_Value[index]
+	return entry
+}
+func (s *server)ProduceMsg(type uint64)pb.MessageSend{
+	var msgSend pb.MessageSend
+	switch type{
+		case 0://entry
+			msgSend.Type = 0
+			msgSend.Term = s.currentTerm
+			msgSend.NodeId = s.nodeId
+			msgSend.CommitIndex = s.CommitIndex
+			msgSend.LogIndex = s.nextIndex[nodeId] - 1
+			msgSend.LogTerm = s.simple_raftlog_Term[s.nextIndex[nodeId] -1]
+			msgSend.Entry = s.ProduceEntry(s.nextIndex[nodeId])
+		case 1://vote
+			msgSend.Type = 1
+			msgSend.NodeId = s.nodeId
+			msgSend.LogIndex = s.simple_raftlog_length
+			msgSend.LogTerm = s.simple_raftlog_Term[s.simple_raftlog_length]
+		case 2://heartbeat
+			msgSend.Type = 2
+			msgSend.Term = s.currentTerm
+			msgSend.NodeId = s.nodeId
+			msgSend.LogIndex = s.nextIndex[nodeId] - 1
+			msgSend.LogTerm = s.simple_raftlog_Term[s.nextIndex[nodeId] -1]
+			msgSend.CommitIndex = s.CommitIndex
+	}
+	return msgSend
+}
+func (s *server)handleReturn(Ret *pb.msgRet,nodeId uint64)bool{
+	switch Ret{
+		case 0:
+			if Ret.Success == 0{
+				s.nextIndex[nodeId] = s.nextIndex[nodeId]-1
+				return false
+			}else{
+				s.matchIndex[nodeId] = s.nextIndex[nodeId]
+				s.nextIndex[nodeId] = s.nextIndex[nodeId]+1
+				return true
+			}
+		case 1:
+		case 2://heartbeat
+	}
+	return false
+}
 func ResetClock()
 {
 	timerLock.Lock()
@@ -140,9 +187,9 @@ func StopClock()
 	timer.Stop()
 	timerLock.Unlock()
 }
-func (s *server)SendEntryRpc(serverAddress string,nodeId uint64){
+func (s *server)SendEntryRpc(serverAddress string,nodeId uint64)bool{
 	//first send a heartbeat, and set a timer, every 10ms send a new Rpc to the peers until it is not leader
-	s.SendHeartBeat(serverAddress)
+	s.SendHeartBeat(serverAddress,nodeId)
 	RpcTimer := time.NewTimer(10 * time.Millisecond)
 	select{
 		case <-(s.state!=3):
@@ -151,7 +198,8 @@ func (s *server)SendEntryRpc(serverAddress string,nodeId uint64){
 			fmt.Println("sending message")
 			conn, _ := grpc.Dial(serverAddress,grpc.WithInsecure())
 			client := pb.NewMsgRpcClient(conn)
-			var msgSend pb.MessageSend
+			msgSend := s.ProduceMsg(0)
+			
 			ctx, _ := context.WithTimeout(context.TODO(),time.Millisecond*100)
 			msgRet, _ := client.TransMsg(ctx,&msgSend)
 	}
@@ -166,14 +214,11 @@ func (s *server)BroadcastEntryRpc(){
 	}
 
 }
-func (s *server)SendHeartBeat(){
+func (s *server)SendHeartBeat(serverAddress string,nodeId uint64){
 	fmt.Println("sending message")
 	conn, _ := grpc.Dial(serverAddress,grpc.WithInsecure())
 	client := pb.NewMsgRpcClient(conn)
-	var msgSend pb.MessageSend
-	msgSend.Type = 2
-	msgSend.Term = s.currentTerm
-	msgSend.NodeId = s.nodeId
+	msgSend := s.ProduceMsg(2)
 	ctx, _ := context.WithTimeout(context.TODO(),time.Millisecond*100)
 	msgRet, _ := client.TransMsg(ctx,&msgSend)
 	conn.Close()
