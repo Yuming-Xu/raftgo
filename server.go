@@ -21,8 +21,8 @@ const (
 
 var timer Time.Timer
 var timerLock sync.Mutex
-var serverLock sync.RWMutex
-var logLock sync.RWMutex
+//var serverLock sync.RWMutex
+//var logLock sync.RWMutex
 var selfAddr string = "127.0.0.1:50051"
 var peers []string = {"127.0.0.1:50051","127.0.0.1:50052","127.0.0.1:50053","127.0.0.1:50054","127.0.0.1:50055"}
 
@@ -109,6 +109,7 @@ func (s *server)TransMsg(ctx context.Context, msgSend *pb.MessageSend)(*pb.Messa
 				//serverLock.Lock()
 				s.CommitIndex = math.min(msgSend.CommitIndex,s.CommitIndex)
 				//serverLock.Unlock()
+				s.CommitLog()
 				}
 			}
 	}
@@ -159,7 +160,11 @@ func (s *server)ProduceMsg(type uint64)pb.MessageSend{
 	}
 	return msgSend
 }
-func (s *server)handleReturn(Ret *pb.msgRet,nodeId uint64)bool{
+func (s *server)HandleReturn(Ret *pb.msgRet,nodeId uint64){
+	if Ret.Term > s.currentTerm{//this server is out-of-date
+		BecomeFollower()
+		return
+	}
 	switch Ret{
 		case 0:
 			if Ret.Success == 0{
@@ -173,7 +178,6 @@ func (s *server)handleReturn(Ret *pb.msgRet,nodeId uint64)bool{
 		case 1:
 		case 2://heartbeat
 	}
-	return false
 }
 func ResetClock()
 {
@@ -187,23 +191,18 @@ func StopClock()
 	timer.Stop()
 	timerLock.Unlock()
 }
-func (s *server)SendEntryRpc(serverAddress string,nodeId uint64)bool{
-	//first send a heartbeat, and set a timer, every 10ms send a new Rpc to the peers until it is not leader
-	s.SendHeartBeat(serverAddress,nodeId)
-	RpcTimer := time.NewTimer(10 * time.Millisecond)
-	select{
-		case <-(s.state!=3):
-			return //stop sending
-		case RpcTimer.C:
-			fmt.Println("sending message")
-			conn, _ := grpc.Dial(serverAddress,grpc.WithInsecure())
-			client := pb.NewMsgRpcClient(conn)
-			msgSend := s.ProduceMsg(0)
-			
-			ctx, _ := context.WithTimeout(context.TODO(),time.Millisecond*100)
-			msgRet, _ := client.TransMsg(ctx,&msgSend)
-	}
-
+func (s *server)SendEntryRpc(serverAddress string,nodeId uint64)uint64{
+	fmt.Println("sending message")
+	conn, _ := grpc.Dial(serverAddress,grpc.WithInsecure())
+	client := pb.NewMsgRpcClient(conn)
+	msgSend := s.ProduceMsg(0)		
+	ctx, _ := context.WithTimeout(context.TODO(),time.Millisecond*100)
+	msgRet, _ := client.TransMsg(ctx,&msgSend)
+	s.HandleReturn(0)
+}
+func (s *server)SendEntryorHeartBeat(serverAddress string,nodeId uint64){
+	//accroding to nextindex[] to decide whether we send app or heartbeat
+	//accroding to state to decide whether to send or stop
 }
 func (s *server)BroadcastEntryRpc(){
 	for i,serverAddress := range peers{
@@ -222,21 +221,33 @@ func (s *server)SendHeartBeat(serverAddress string,nodeId uint64){
 	ctx, _ := context.WithTimeout(context.TODO(),time.Millisecond*100)
 	msgRet, _ := client.TransMsg(ctx,&msgSend)
 	conn.Close()
-
+	s.HandleReturn(msgRet,2)
 }
 func (s *server)BroadcastHeartBeat(){
 	for i,serverAddress := range peers{
 		if i == s.nodeId{
 			continue
 		}
-		go s.SendHeartBeat(serverAddress)
+		go s.SendHeartBeat(serverAddress,i)
 	}
 }
-func (s *server)SendVoteRpc(){
-
+func (s *server)SendVoteRpc(serverAddress string,nodeId uint64){
+	fmt.Println("sending message")
+	conn, _ := grpc.Dial(serverAddress,grpc.WithInsecure())
+	client := pb.NewMsgRpcClient(conn)
+	msgSend := s.ProduceMsg(1)
+	ctx, _ := context.WithTimeout(context.TODO(),time.Millisecond*100)
+	msgRet, _ := client.TransMsg(ctx,&msgSend)
+	conn.Close()
+	s.HandleReturn(msgRet,1)
 }
 func (s *server)BroadcastVoteRpc(){
-
+	for i,serverAddress := range peers{
+		if i == s.nodeId{
+			continue
+		}
+		go s.SendVoteRpc(serverAddress,i)
+	}
 }
 func (s *server)BecomeFollower(){
 	s.state = 1
@@ -255,7 +266,7 @@ func (s *server)BecomeLeader(){
 	matchIndex[3] = 0
 	matchIndex[4] = 0
 	matchIndex[5] = 0
-	go grpcserver.BroadcastEntryRpc()
+	go grpcserver.BroadcastHeartBeat()
 }
 func (s *server)BecomeCandidate(){
 	s.state = 2
@@ -281,11 +292,18 @@ func (s *server)ResetServer(){
 	timer.NewTimer((rand.Int(400)+100)*time.Millisecond)
 	go s.timerFunc()
 }
-func (s *server)ForwardCommand(){
-
+func (s *server)ForwardCommand(Req *pb.Request){
+	fmt.Println("forwarding message")
+	conn, _ := grpc.Dial(peers[s.leaderId],grpc.WithInsecure())
+	client := pb.NewRecvCmdClient(conn)
+	client.RecvCmd(context.Background(),Req)
+	conn.Close()
 }
 func (s *server)CommitLog(){
-
+	for s.CommitIndex>s.lastApplied{
+		s.lastApplied = s.lastApplied+1
+		s.simple_kvstore[s.simple_raftlog_key[s.lastApplied]] = s.simple_kvstore[s.simple_raftlog_Value[s.lastApplied]]
+	}
 }
 func (s *server)TimerFunc(){
 	for{
