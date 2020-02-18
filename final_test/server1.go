@@ -40,13 +40,13 @@ type server struct{
 	simple_raftlog_Value [MAXLOGLENGTH] string 
 	simple_raftlog_Term [MAXLOGLENGTH] uint64 
 	simple_raftlog_length uint64 
-	nextIndex []uint64 
-	matchIndex []uint64 
+	nextIndex [MAXLOGLENGTH]uint64 
+	matchIndex [MAXLOGLENGTH]uint64 
 }
 
 //access to much critcal area
 func (s *server)TransMsg(ctx context.Context, msgSend *pb.MessageSend)(*pb.MessageRet, error){
-	fmt.Println("node:%d:Reciving from node:%d",s.NodeID,msgSend.NodeID)
+	log.Println("node:",s.NodeID,":Reciving from node:",msgSend.NodeID)
 	var msgRet pb.MessageRet
 
 	switch msgSend.Type{
@@ -59,6 +59,7 @@ func (s *server)TransMsg(ctx context.Context, msgSend *pb.MessageSend)(*pb.Messa
 		//serverLock.Lock()
 		s.currentTerm = msgSend.Term
 		//serverLock.Unlock()
+		ResetClock()
 		s.BecomeFollower()
 	}
 	//serverLock.RLock()
@@ -68,6 +69,7 @@ func (s *server)TransMsg(ctx context.Context, msgSend *pb.MessageSend)(*pb.Messa
 	switch msgSend.Type {
 		case 1://voteRPC
 			if msgSend.Term < s.currentTerm {
+				log.Println("node:",s.NodeID,"lower term, reject")
 				msgRet.Success = 0
 			} else {
 				if s.votedFor == 0 || s.votedFor == msgSend.NodeID{
@@ -75,9 +77,11 @@ func (s *server)TransMsg(ctx context.Context, msgSend *pb.MessageSend)(*pb.Messa
 						s.votedFor = msgSend.NodeID
 						msgRet.Success = 1
 					}else{
+						log.Println("node:",s.NodeID,"out-of-date, reject")
 						msgRet.Success = 0
 					}
 				}else {
+					log.Println("node:",s.NodeID,"have votedFor other, reject")
 					msgRet.Success = 0
 				}
 			}
@@ -144,7 +148,7 @@ func (s *server)ProduceEntry(index uint64)pb.Entry{
 	entry.Value = s.simple_raftlog_Value[index]
 	return entry
 }
-func (s *server)ProduceMsg(Type uint64)(pb.MessageSend){
+func (s *server)ProduceMsg(Type uint64,NodeID uint64)(pb.MessageSend){
 	var msgSend pb.MessageSend
 	switch Type{
 		case 0://entry
@@ -152,11 +156,12 @@ func (s *server)ProduceMsg(Type uint64)(pb.MessageSend){
 			msgSend.Term = s.currentTerm
 			msgSend.NodeID = s.NodeID
 			msgSend.CommitIndex = s.CommitIndex
-			msgSend.LogIndex = s.nextIndex[s.NodeID] - 1
-			msgSend.LogTerm = s.simple_raftlog_Term[s.nextIndex[s.NodeID] -1]
-			*msgSend.Entry = s.ProduceEntry(s.nextIndex[s.NodeID])
+			msgSend.LogIndex = s.nextIndex[NodeID] - 1
+			msgSend.LogTerm = s.simple_raftlog_Term[s.nextIndex[NodeID] -1]
+			*msgSend.Entry = s.ProduceEntry(s.nextIndex[NodeID])
 		case 1://vote
 			msgSend.Type = 1
+			msgSend.Term = s.currentTerm
 			msgSend.NodeID = s.NodeID
 			msgSend.LogIndex = s.simple_raftlog_length
 			msgSend.LogTerm = s.simple_raftlog_Term[s.simple_raftlog_length]
@@ -164,13 +169,18 @@ func (s *server)ProduceMsg(Type uint64)(pb.MessageSend){
 			msgSend.Type = 2
 			msgSend.Term = s.currentTerm
 			msgSend.NodeID = s.NodeID
-			msgSend.LogIndex = s.nextIndex[s.NodeID] - 1
-			msgSend.LogTerm = s.simple_raftlog_Term[s.nextIndex[s.NodeID] -1]
+			msgSend.LogIndex = s.nextIndex[NodeID] - 1
+			msgSend.LogTerm = s.simple_raftlog_Term[s.nextIndex[NodeID] -1]
 			msgSend.CommitIndex = s.CommitIndex
 	}
 	return msgSend
 }
 func (s *server)HandleReturn(Ret *pb.MessageRet,NodeID uint64){
+	log.Println("node:",s.NodeID,"handling return")
+	if Ret == nil{
+		log.Println("bug find!!!!")
+	}
+	log.Println("node",NodeID,"return:",Ret.Success)
 	if Ret.Term > s.currentTerm{//this server is out-of-date
 		s.BecomeFollower()
 		return
@@ -185,50 +195,50 @@ func (s *server)HandleReturn(Ret *pb.MessageRet,NodeID uint64){
 			}
 		case 1:
 			if Ret.Success == 1{
-				fmt.Println("Recivie vote from",NodeID)
+				log.Println("Recivie vote from",NodeID)
 				s.votes = s.votes + 1
 			}
 		case 2://heartbeat
 			if Ret.Success == 0{
 				s.nextIndex[NodeID] = s.nextIndex[NodeID]-1
-			}else{
-				s.matchIndex[NodeID] = s.nextIndex[NodeID]
-				s.nextIndex[NodeID] = s.nextIndex[NodeID]+1
 			}
 	}
 }
 func ResetClock(){
-	fmt.Println("Clock reset")
-	timerLock.Lock()
+	log.Println("Clock reset")
+	//timerLock.Lock()
 	timer.Reset(time.Duration(rand.Intn(10)+10)*time.Second)
-	timerLock.Unlock()
+	//timerLock.Unlock()
 }
 func StopClock(){
-	fmt.Println("Clock stoped")
-	timerLock.Lock()
+	log.Println("Clock stoped")
+	//timerLock.Lock()
 	timer.Stop()
-	timerLock.Unlock()
+	//timerLock.Unlock()
 }
 func (s *server)SendEntryRpc(serverAddress string,NodeID uint64){
-	fmt.Println("node:",s.NodeID,":sending EntryRpc to",NodeID)
+	log.Println("node:",s.NodeID,":sending EntryRpc to",NodeID)
 	conn, _ := grpc.Dial(serverAddress,grpc.WithInsecure())
 	client := pb.NewMsgRpcClient(conn)
-	msgSend := s.ProduceMsg(0)		
+	msgSend := s.ProduceMsg(0,NodeID)		
 	ctx, _ := context.WithTimeout(context.TODO(),time.Millisecond*1000)
-	msgRet, _ := client.TransMsg(ctx,&msgSend)
-	s.HandleReturn(msgRet,0)
+	msgRet, err := client.TransMsg(ctx,&msgSend)
+	if err == nil {
+		s.HandleReturn(msgRet,NodeID)
+	}
+	conn.Close()
 }
 func (s *server)BroadcastRpc(){
-	fmt.Println("node:",s.NodeID,":Broadcasting Rpc")
+	log.Println("node:",s.NodeID,":Broadcasting Rpc")
 	for i,serverAddress := range peers{
-		if uint64(i) == s.NodeID{
+		if uint64(i+1) == s.NodeID{
 			continue
 		}
-		go s.SendEntryorHeartBeat(serverAddress,uint64(i))
+		go s.SendEntryorHeartBeat(serverAddress,uint64(i+1))
 	}
 }
 func (s *server)SendEntryorHeartBeat(serverAddress string,NodeID uint64){
-	fmt.Println("node:",s.NodeID,":sending heartbeat/entryRpc to ",NodeID)
+	log.Println("node:",s.NodeID,":sending heartbeat/entryRpc to ",NodeID)
 	//accroding to nextindex[] to decide whether we send app or heartbeat
 	//accroding to state to decide whether to send or stop
 	if s.nextIndex[NodeID] > s.simple_raftlog_length{//send heartbeat
@@ -238,74 +248,79 @@ func (s *server)SendEntryorHeartBeat(serverAddress string,NodeID uint64){
 	}
 }
 func (s *server)BroadcastEntryRpc(){
-	fmt.Println("node:",s.NodeID,":Broadcasting EntryRpc")
+	log.Println("node:",s.NodeID,":Broadcasting EntryRpc")
 	for i,serverAddress := range peers{
-		if uint64(i) == s.NodeID{
+		if uint64(i+1) == s.NodeID{
 			continue
 		}
-		go s.SendEntryRpc(serverAddress,uint64(i))
+		go s.SendEntryRpc(serverAddress,uint64(i+1))
 	}
 }
 func (s *server)SendHeartBeat(serverAddress string,NodeID uint64){
-	fmt.Println("node:",s.NodeID,":sending heartbeat to ",NodeID)
+	log.Println("node:",s.NodeID,":sending heartbeat to ",NodeID)
 	conn, _ := grpc.Dial(serverAddress,grpc.WithInsecure())
 	client := pb.NewMsgRpcClient(conn)
-	msgSend := s.ProduceMsg(2)
+	msgSend := s.ProduceMsg(2,NodeID)
 	ctx, _ := context.WithTimeout(context.TODO(),time.Millisecond*1000)
-	msgRet, _ := client.TransMsg(ctx,&msgSend)
+	msgRet, err := client.TransMsg(ctx,&msgSend)
+	if err == nil {
+		s.HandleReturn(msgRet,NodeID)
+	}
 	conn.Close()
-	s.HandleReturn(msgRet,2)
 }
 func (s *server)BroadcastHeartBeat(){
-	fmt.Println("node:",s.NodeID,":Broadcasting heartbeat")
+	log.Println("node:",s.NodeID,":Broadcasting heartbeat")
 	for i,serverAddress := range peers{
-		if uint64(i) == s.NodeID{
+		if uint64(i+1) == s.NodeID{
 			continue
 		}
-		go s.SendHeartBeat(serverAddress,uint64(i))
+		go s.SendHeartBeat(serverAddress,uint64(i+1))
 	}
 }
 func (s *server)SendVoteRpc(serverAddress string,NodeID uint64){
-	fmt.Println("node:",s.NodeID,":Sending VoteRpc to",NodeID)
+	log.Println("node:",s.NodeID,":Sending VoteRpc to",NodeID)
 	conn, _ := grpc.Dial(serverAddress,grpc.WithInsecure())
 	client := pb.NewMsgRpcClient(conn)
-	msgSend := s.ProduceMsg(1)
+	msgSend := s.ProduceMsg(1,NodeID)
 	ctx, _ := context.WithTimeout(context.TODO(),time.Millisecond*1000)
-	msgRet, _ := client.TransMsg(ctx,&msgSend)
+	msgRet, err := client.TransMsg(ctx,&msgSend)
+	if err == nil {
+		s.HandleReturn(msgRet,NodeID)
+	}
 	conn.Close()
-	s.HandleReturn(msgRet,1)
 }
 func (s *server)BroadcastVoteRpc(){
-	fmt.Println("node:",s.NodeID,":Broadcasting VoteRpc")
+	log.Println("node:",s.NodeID,":Broadcasting VoteRpc")
 	for i,serverAddress := range peers{
-		if uint64(i) == s.NodeID{
+		if uint64(i+1) == s.NodeID{
 			continue
 		}
-		go s.SendVoteRpc(serverAddress,uint64(i))
+		go s.SendVoteRpc(serverAddress,uint64(i+1))
 	}
 }
 func (s *server)BecomeFollower(){
-	fmt.Println("node:",s.NodeID,":BecomeFollower")
+	log.Println("node:",s.NodeID,":BecomeFollower")
 	s.state = 1
 	s.votedFor = 0
 }
 func (s *server)BecomeLeader(){
-	fmt.Println("node:",s.NodeID,":BecomeLeader")
+	log.Println("node:",s.NodeID,":BecomeLeader")
 	s.state = 3
 	s.leaderId = s.NodeID
-	//nextIndex[1] = s.simple_raftlog_length+1
+	StopClock()
+	//s.nextIndex[1] = s.simple_raftlog_length+1
 	s.nextIndex[2] = s.simple_raftlog_length+1
 	s.nextIndex[3] = s.simple_raftlog_length+1
 	s.nextIndex[4] = s.simple_raftlog_length+1
 	s.nextIndex[5] = s.simple_raftlog_length+1
-	//matchIndex[1] = 0
+	//s.matchIndex[1] = 0
 	s.matchIndex[2] = 0
 	s.matchIndex[3] = 0
 	s.matchIndex[4] = 0
 	s.matchIndex[5] = 0
 }
 func (s *server)BecomeCandidate(){
-	fmt.Println("node:",s.NodeID,":BecomeCandidate")
+	log.Println("node:",s.NodeID,":BecomeCandidate")
 	s.state = 2
 	//serverLock.Lock()
 	s.currentTerm = s.currentTerm + 1
@@ -324,21 +339,22 @@ func (s *server)ResetServer(){
 	s.lastApplied = 0//doesn't apple anything
 	s.CommitIndex = 0
 	s.simple_kvstore = make(map[string]string)
+	s.simple_raftlog_length = 0
 	s.votes = 0
 	s.state = 1//follower
 	timer = time.NewTimer(time.Duration(rand.Intn(10)+10)*time.Second)
-	fmt.Println("node:",s.NodeID,":Resetting Server")
+	log.Println("node:",s.NodeID,":Resetting Server")
 	go s.TimerFunc()
 }
 func (s *server)ForwardCommand(Req *pb.Request){
-	fmt.Println("node:%d:Forwarding message",s.NodeID)
+	log.Println("node:%d:Forwarding message",s.NodeID)
 	conn, _ := grpc.Dial(peers[s.leaderId],grpc.WithInsecure())
 	client := pb.NewMsgRpcClient(conn)
 	client.RecvCmd(context.Background(),Req)
 	conn.Close()
 }
 func (s *server)CommitLog(){
-	fmt.Println("node:",s.NodeID,":Commiting log")
+	log.Println("node:",s.NodeID,":Commiting log")
 	for s.CommitIndex>s.lastApplied{
 		s.lastApplied = s.lastApplied+1
 		s.simple_kvstore[s.simple_raftlog_key[s.lastApplied]] = s.simple_kvstore[s.simple_raftlog_Value[s.lastApplied]]
@@ -348,13 +364,13 @@ func (s *server)TimerFunc(){
 	for{
 		select{
 			case <- timer.C:
-				fmt.Println("node:",s.NodeID,":Time out, begin election")
+				log.Println("node:",s.NodeID,":Time out, begin election")
 				s.BecomeCandidate()
 		}
 	}
 }
 func (s *server)RecvCmd(ctx context.Context,cmd *pb.Request)(*pb.SuccessMsg,error){
-	fmt.Println("node:",s.NodeID,":Reciving cmd from client")
+	log.Println("node:",s.NodeID,":Reciving cmd from client")
 	var RetMsg pb.SuccessMsg
 	if s.leaderId != s.NodeID{//leader is not me
 		s.ForwardCommand(cmd)
@@ -363,6 +379,12 @@ func (s *server)RecvCmd(ctx context.Context,cmd *pb.Request)(*pb.SuccessMsg,erro
 	}
 	RetMsg.Success = true
 	return &RetMsg,nil
+}
+func AnounanceTime(){
+	for {
+		fmt.Println(time.Now())
+		time.Sleep(5*time.Second)
+	}
 }
 
 func main(){
@@ -380,19 +402,21 @@ func main(){
 	raftserver = new(server)
 	pb.RegisterMsgRpcServer(grpcserver,raftserver)
 	raftserver.ResetServer()
+	RpcTimer := time.NewTimer(5*time.Second)
 	go raftserver.TimerFunc()
 	go grpcserver.Serve(lis)//begin to serve
+	//go AnounanceTime()
 	raftserver.BecomeFollower()//at first, the server is a follower
 	for{
 		switch raftserver.state{
 			case 1://follower state,do nothing
 			case 2://candidate state
-				if raftserver.votes == 3{
+				if raftserver.votes >= 3{
 					raftserver.BecomeLeader()
 				}
 			case 3://leader state
 				go raftserver.BroadcastRpc()
-				RpcTimer := time.NewTimer(3*time.Second)
+				RpcTimer.Reset(3*time.Second)
 				select{
 					case <- RpcTimer.C:
 				}
