@@ -2,7 +2,7 @@ package main
 import(
 	"fmt"
 	"time"
-	"sync"
+	//"sync"
 	"log"
 	"net"
 	"math/rand"
@@ -19,7 +19,7 @@ const (
 )
 
 var timer *time.Timer
-var timerLock sync.Mutex
+//var timerLock sync.Mutex
 //var serverLock sync.RWMutex
 //var logLock sync.RWMutex
 var selfAddr string = "127.0.0.1:50054"
@@ -47,17 +47,23 @@ type server struct{
 //access to much critcal area
 func (s *server)TransMsg(ctx context.Context, msgSend *pb.MessageSend)(*pb.MessageRet, error){
 	log.Println("node:",s.NodeID,":Reciving from node:",msgSend.NodeID)
+	fmt.Println(msgSend.Type,msgSend.Term,msgSend.LogIndex,msgSend.LogTerm,msgSend.CommitIndex,msgSend.NodeID)
+	fmt.Println(s.simple_raftlog_length,s.CommitIndex,s.currentTerm,s.votes,s.lastApplied,s.votedFor)
 	var msgRet pb.MessageRet
-
+	/*
+	ResetClock()
+	msgRet.Success = 1
+	msgRet.Term = msgSend.Term
+	*/
 	switch msgSend.Type{
 		case 0:msgRet.Type = 0
 		case 1:msgRet.Type = 1
 		case 2:msgRet.Type = 2
 	}
-
 	if msgSend.Term > s.currentTerm {
 		//serverLock.Lock()
 		s.currentTerm = msgSend.Term
+		s.votedFor = 0
 		//serverLock.Unlock()
 		ResetClock()
 		s.BecomeFollower()
@@ -126,6 +132,7 @@ func (s *server)TransMsg(ctx context.Context, msgSend *pb.MessageSend)(*pb.Messa
 				}
 			}
 	}
+	log.Println("Transback message")
 	return &msgRet,nil
 }
 func (s *server)IsUpToDate(Term,Index uint64)bool{
@@ -218,7 +225,10 @@ func StopClock(){
 }
 func (s *server)SendEntryRpc(serverAddress string,NodeID uint64){
 	log.Println("node:",s.NodeID,":sending EntryRpc to",NodeID)
-	conn, _ := grpc.Dial(serverAddress,grpc.WithInsecure())
+	conn, err := grpc.Dial(serverAddress,grpc.WithInsecure())
+	if err != nil {
+		log.Fatalf("fail to dial: %v", err)
+	}
 	client := pb.NewMsgRpcClient(conn)
 	msgSend := s.ProduceMsg(0,NodeID)		
 	ctx, _ := context.WithTimeout(context.TODO(),time.Millisecond*1000)
@@ -258,7 +268,10 @@ func (s *server)BroadcastEntryRpc(){
 }
 func (s *server)SendHeartBeat(serverAddress string,NodeID uint64){
 	log.Println("node:",s.NodeID,":sending heartbeat to ",NodeID)
-	conn, _ := grpc.Dial(serverAddress,grpc.WithInsecure())
+	conn, err := grpc.Dial(serverAddress,grpc.WithInsecure())
+	if err != nil {
+		log.Fatalf("fail to dial: %v", err)
+	}
 	client := pb.NewMsgRpcClient(conn)
 	msgSend := s.ProduceMsg(2,NodeID)
 	ctx, _ := context.WithTimeout(context.TODO(),time.Millisecond*1000)
@@ -279,7 +292,10 @@ func (s *server)BroadcastHeartBeat(){
 }
 func (s *server)SendVoteRpc(serverAddress string,NodeID uint64){
 	log.Println("node:",s.NodeID,":Sending VoteRpc to",NodeID)
-	conn, _ := grpc.Dial(serverAddress,grpc.WithInsecure())
+	conn, err := grpc.Dial(serverAddress,grpc.WithInsecure())
+	if err != nil {
+		log.Fatalf("fail to dial: %v", err)
+	}
 	client := pb.NewMsgRpcClient(conn)
 	msgSend := s.ProduceMsg(1,NodeID)
 	ctx, _ := context.WithTimeout(context.TODO(),time.Millisecond*1000)
@@ -387,6 +403,28 @@ func AnounanceTime(){
 	}
 }
 
+
+func (s *server)MaintainState(){
+	RpcTimer := time.NewTimer(5*time.Second)
+	for{
+		switch s.state{
+			case 1://follower state,do nothing
+				time.Sleep(50*time.Millisecond)
+			case 2://candidate state
+				time.Sleep(50*time.Millisecond)
+				if s.votes >= 3{
+					s.BecomeLeader()
+				}
+			case 3://leader state
+				go s.BroadcastRpc()
+				RpcTimer.Reset(3*time.Second)
+				select{
+					case <- RpcTimer.C:
+				}
+		}
+	}
+}
+
 func main(){
 	peers = []string{	"127.0.0.1:50051",
 						"127.0.0.1:50052",
@@ -402,24 +440,13 @@ func main(){
 	raftserver = new(server)
 	pb.RegisterMsgRpcServer(grpcserver,raftserver)
 	raftserver.ResetServer()
-	RpcTimer := time.NewTimer(5*time.Second)
-	go raftserver.TimerFunc()
+	raftserver.BecomeFollower()//at first, the server is a follower
+	go raftserver.MaintainState()
+	//go raftserver.TimerFunc() extra func
 	go grpcserver.Serve(lis)//begin to serve
 	//go AnounanceTime()
-	raftserver.BecomeFollower()//at first, the server is a follower
 	for{
-		switch raftserver.state{
-			case 1://follower state,do nothing
-			case 2://candidate state
-				if raftserver.votes >= 3{
-					raftserver.BecomeLeader()
-				}
-			case 3://leader state
-				go raftserver.BroadcastRpc()
-				RpcTimer.Reset(3*time.Second)
-				select{
-					case <- RpcTimer.C:
-				}
-		}
+		time.Sleep(5*time.Second)
+		log.Println("main is running")
 	}
 }
