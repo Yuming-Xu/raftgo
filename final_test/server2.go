@@ -2,6 +2,7 @@ package main
 import(
 	"fmt"
 	"time"
+	"sort"
 	//"sync"
 	"log"
 	"net"
@@ -128,7 +129,6 @@ func (s *server)TransMsg(ctx context.Context, msgSend *pb.MessageSend)(*pb.Messa
 					}
 				
 				//serverLock.Unlock()
-				s.CommitLog()
 				}
 			}
 	}
@@ -140,20 +140,20 @@ func (s *server)IsUpToDate(Term,Index uint64)bool{
 }
 func (s *server)AddEntry(key,Value string,Term uint64){
 	//logLock.Lock()
+	s.simple_raftlog_length = s.simple_raftlog_length + 1
 	s.simple_raftlog_Term[s.simple_raftlog_length] = Term
 	s.simple_raftlog_Value[s.simple_raftlog_length] = Value
 	s.simple_raftlog_key[s.simple_raftlog_length] = key
-	s.simple_raftlog_length = s.simple_raftlog_length + 1
 	//logLock.Unlock()
 }
-func (s *server)ProduceEntry(index uint64)pb.Entry{
+func (s *server)ProduceEntry(index uint64)*pb.Entry{
 	var entry pb.Entry
 	entry.Type = 0//todo: produce configtype
 	entry.Term = s.simple_raftlog_Term[index]
 	entry.Index = index
 	entry.Key = s.simple_raftlog_key[index]
 	entry.Value = s.simple_raftlog_Value[index]
-	return entry
+	return &entry
 }
 func (s *server)ProduceMsg(Type uint64,NodeID uint64)(pb.MessageSend){
 	var msgSend pb.MessageSend
@@ -165,7 +165,7 @@ func (s *server)ProduceMsg(Type uint64,NodeID uint64)(pb.MessageSend){
 			msgSend.CommitIndex = s.CommitIndex
 			msgSend.LogIndex = s.nextIndex[NodeID] - 1
 			msgSend.LogTerm = s.simple_raftlog_Term[s.nextIndex[NodeID] -1]
-			*msgSend.Entry = s.ProduceEntry(s.nextIndex[NodeID])
+			msgSend.Entry = s.ProduceEntry(s.nextIndex[NodeID])
 		case 1://vote
 			msgSend.Type = 1
 			msgSend.Term = s.currentTerm
@@ -364,16 +364,17 @@ func (s *server)ResetServer(){
 }
 func (s *server)ForwardCommand(Req *pb.Request){
 	log.Println("node:%d:Forwarding message",s.NodeID)
-	conn, _ := grpc.Dial(peers[s.leaderId],grpc.WithInsecure())
+	conn, _ := grpc.Dial(peers[s.leaderId-1],grpc.WithInsecure())
 	client := pb.NewMsgRpcClient(conn)
 	client.RecvCmd(context.Background(),Req)
 	conn.Close()
 }
 func (s *server)CommitLog(){
-	log.Println("node:",s.NodeID,":Commiting log")
+	time.Sleep(time.Second)
 	for s.CommitIndex>s.lastApplied{
 		s.lastApplied = s.lastApplied+1
 		s.simple_kvstore[s.simple_raftlog_key[s.lastApplied]] = s.simple_kvstore[s.simple_raftlog_Value[s.lastApplied]]
+		log.Println("node:",s.NodeID,":Commiting log",s.lastApplied)
 	}
 }
 func (s *server)TimerFunc(){
@@ -402,6 +403,30 @@ func AnounanceTime(){
 		time.Sleep(5*time.Second)
 	}
 }
+func (s *server)CheckMatch()uint64{
+	i := 1
+	var result int
+	var check []int
+	for i<=5{
+		if uint64(i)==s.NodeID{
+			i++
+			continue
+		}
+		check = append(check,int(s.matchIndex[i]))
+		i++
+	}
+	sort.Ints(check)
+	if check[3]==check[2]{
+		result = check[3]
+	}else if check[2]==check[1]{
+		result = check[2]
+	}else if check[1]==check[0]{
+		result = check[1]
+	}else{
+		result = check[0]
+	}
+	return uint64(result)
+}
 
 
 func (s *server)MaintainState(){
@@ -420,6 +445,7 @@ func (s *server)MaintainState(){
 				RpcTimer.Reset(3*time.Second)
 				select{
 					case <- RpcTimer.C:
+						s.CommitIndex =  s.CheckMatch()
 				}
 		}
 	}
@@ -442,11 +468,8 @@ func main(){
 	raftserver.ResetServer()
 	raftserver.BecomeFollower()//at first, the server is a follower
 	go raftserver.MaintainState()
+	go raftserver.CommitLog()
 	//go raftserver.TimerFunc() extra func
-	go grpcserver.Serve(lis)//begin to serve
+	grpcserver.Serve(lis)//begin to serve
 	//go AnounanceTime()
-	for{
-		time.Sleep(5*time.Second)
-		log.Println("main is running")
-	}
 }
