@@ -46,17 +46,26 @@ message Entry {
 }
 
 message MessageSend{
-	MessageSendType 		type 		 = 1;//0 stands for AppendEntries RPC,1 stands for RequestVote RPC
-	uint64					term 		 = 2;//leader's or candidate's term
-	uint64					logIndex 	 = 3;//app: prelogindex, vote: lastlogindex
-	uint64					logTerm		 = 4;//the same
-	uint64  				commitIndex  = 5;//commit index
-	uint64					nodeID		 = 6;//leaderID or candidateID
-	Entry 					entry 	 	 = 7;//entries[],only set one
+	MessageSendType 		type 		 = 1;
+	//0 stands for AppendEntries RPC,1 stands for RequestVote RPC
+	//2 stands for heartbeat
+	uint64					term 		 = 2;
+	//leader's or candidate's term
+	uint64					logIndex 	 = 3;
+	//app: prelogindex, vote: lastlogindex
+	uint64					logTerm		 = 4;
+	//the same
+	uint64  				commitIndex  = 5;
+	//commit index
+	uint64					nodeID		 = 6;
+	//leaderID or candidateID
+	Entry 					entry 	 	 = 7;
+	//entries[],only set one
 }
 
 message MessageRet{
 	MessageReturnType 	type 		 = 1;
 	uint64 				term 		 = 2;
-	uint64 				success 	 = 3;//app:success, vote:voteGranted
+	uint64 				success 	 = 3;
+	//app:success, vote:voteGranted
 }
